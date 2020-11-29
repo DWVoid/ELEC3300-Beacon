@@ -1,6 +1,8 @@
 package cn.dwvoid.beacon
 
-import android.bluetooth.*
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
@@ -16,185 +18,14 @@ import androidx.appcompat.app.AppCompatActivity
 import io.github.controlwear.virtual.joystick.android.JoystickView
 import kotlinx.coroutines.*
 import kotlinx.coroutines.android.asCoroutineDispatcher
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.util.*
 import kotlin.math.cos
 import kotlin.math.pow
 import kotlin.math.sin
 
 private const val REQUEST_ENABLE_BT = 31128
 private const val SCAN_PERIOD: Long = 5000
-private val SERVICE_UUID = UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
-private val CHARACTERISTIC_UUID = UUID.fromString("0000ffe1-0000-1000-8000-00805f9b34fb")
-private val DESCRIPTOR_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-
-private class RotatingAverage  {
-    private val value = DoubleArray(256)
-    private val time = LongArray(256)
-    private var tail: Long = 0
-    private var head: Long = 0
-
-    fun add(toAdd: Double) {
-        if ((head - tail) < 256) {
-            val idx = (head++ and 0xFF).toInt()
-            time[idx] = System.currentTimeMillis()
-            value[idx] = toAdd
-        }
-    }
-
-    private fun trim() {
-        val limit = System.currentTimeMillis() - 150
-        while (tail < head) {
-            val idx = (tail and 0xFF).toInt()
-            if (time[idx] < limit) ++tail else return
-        }
-    }
-
-    fun average(): Double {
-        trim()
-        var sum = 0.0
-        var x = tail
-        while (x < head) sum += value[(x++ and 0xFF).toInt()]
-        val count = head - tail
-        return if (count > 0) sum / count else 0.0
-    }
-}
 
 private class MyConnectionError(val reason: String) : Throwable()
-
-private class CommandEmitter {
-    private var v = false
-    private var x = 0.0
-    private var y = 0.0
-    private var z = 0.0
-
-    fun push(x: Double, y: Double, z: Double) {
-        this.v = true
-        this.x = x
-        this.y = y
-        this.z = z
-    }
-
-    fun get() = if (this.v) command() else null
-
-    private fun command(): ByteArray {
-        v = false
-        val rx = (x * 1000.0).toInt().toShort()
-        val ry = (y * 1000.0).toInt().toShort()
-        val rz = (z * 1000.0).toInt().toShort()
-        val buffer = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
-        buffer.put('C'.toByte()).put('X'.toByte())
-        buffer.putShort(rx).putShort(ry).putShort(rz)
-        return buffer.array()
-    }
-}
-
-open class BeaconRssiPoller(protected val scope: CoroutineScope) : BluetoothGattCallback() {
-    protected var device: BluetoothGatt ? = null
-    private var rssiRate = -1
-    var onRssi: (Int) -> Unit = {}
-    var onLost: () -> Unit = {}
-
-    fun enableRssi(rate: Int) {
-        rssiRate = rate
-        if (rate > 0) startRssiRequest()
-    }
-
-    override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-        super.onConnectionStateChange(gatt, status, newState)
-        when (newState) {
-            BluetoothProfile.STATE_CONNECTED -> {
-                device = gatt
-            }
-            BluetoothProfile.STATE_DISCONNECTED -> scope.launch { cbOnLost() }
-        }
-    }
-
-    override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
-        startRssiRequest()
-        scope.launch { onRssi(rssi) }
-    }
-
-    private suspend fun requestRssi() {
-        val rate = rssiRate
-        if (rate > 0) {
-            delay(rate.toLong())
-            device?.readRemoteRssi()
-        }
-    }
-
-    private fun cbOnLost() = onLost()
-
-    private fun startRssiRequest() {
-        scope.launch { requestRssi() }
-    }
-
-    fun close() = device?.close()
-}
-
-class BeaconPrimary(scope: CoroutineScope) : BeaconRssiPoller(scope) {
-    private lateinit var characteristic: BluetoothGattCharacteristic
-    private val command = CommandEmitter()
-    private var cmdSenderLive = false
-    var onInit: () -> Unit = {}
-    var onRead: (String) -> Unit = {}
-
-    override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-        super.onConnectionStateChange(gatt, status, newState)
-        when (newState) {
-            BluetoothProfile.STATE_CONNECTED -> gatt.discoverServices()
-        }
-    }
-
-    override fun onDescriptorWrite(g: BluetoothGatt, x: BluetoothGattDescriptor, s: Int) {
-        super.onDescriptorWrite(g, x, s)
-        if (x.uuid == DESCRIPTOR_UUID) scope.launch { cbOnInit() }
-    }
-
-    override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-        characteristic = gatt.getService(SERVICE_UUID).getCharacteristic(CHARACTERISTIC_UUID)
-        gatt.setCharacteristicNotification(characteristic, true)
-        val desc = characteristic.getDescriptor(DESCRIPTOR_UUID)
-        desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-        gatt.writeDescriptor(desc)
-    }
-
-    override fun onCharacteristicChanged(gatt: BluetoothGatt, x: BluetoothGattCharacteristic) {
-        super.onCharacteristicChanged(gatt, x)
-        if (x == characteristic) scope.launch { cbOnRead(characteristic.getStringValue(0)) }
-    }
-
-    override fun onCharacteristicWrite(x: BluetoothGatt, v: BluetoothGattCharacteristic, s: Int) {
-        super.onCharacteristicWrite(x, v, s)
-        synchronized(this) { if (cmdSenderLive) cmdSenderLive = writeCommand() }
-    }
-
-    private fun cbOnInit() = onInit()
-
-    private fun cbOnRead(x: String) = onRead(x)
-
-    fun write(v: String) {
-        characteristic.setValue(v)
-        device?.writeCharacteristic(characteristic)
-    }
-
-    private fun writeCommand(): Boolean {
-        val x = command.get()
-        if (x != null) {
-            characteristic.value = x
-            device?.writeCharacteristic(characteristic)
-        }
-        return x != null
-    }
-
-    fun cmd(x: Double, y: Double, z: Double) {
-        synchronized(this) {
-            command.push(x, y, z)
-            if (!cmdSenderLive) writeCommand()
-        }
-    }
-}
 
 class BeaconLocator(
     private val l: BeaconRssiPoller,
