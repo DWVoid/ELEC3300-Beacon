@@ -13,13 +13,15 @@ import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import androidx.appcompat.app.AppCompatActivity
+import io.github.controlwear.virtual.joystick.android.JoystickView
 import kotlinx.coroutines.*
 import kotlinx.coroutines.android.asCoroutineDispatcher
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.*
+import kotlin.math.cos
 import kotlin.math.pow
-
+import kotlin.math.sin
 
 private const val REQUEST_ENABLE_BT = 31128
 private const val SCAN_PERIOD: Long = 5000
@@ -61,17 +63,49 @@ private class RotatingAverage  {
 
 private class MyConnectionError(val reason: String) : Throwable()
 
+private class CommandEmitter {
+    private var v = false
+    private var x = 0.0
+    private var y = 0.0
+    private var z = 0.0
+
+    fun push(x: Double, y: Double, z: Double) {
+        this.v = true
+        this.x = x
+        this.y = y
+        this.z = z
+    }
+
+    fun get() = if (this.v) command() else null
+
+    private fun command(): ByteArray {
+        v = false
+        val rx = (x * 1000.0).toInt().toShort()
+        val ry = (y * 1000.0).toInt().toShort()
+        val rz = (z * 1000.0).toInt().toShort()
+        val buffer = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+        buffer.put('C'.toByte()).put('X'.toByte())
+        buffer.putShort(rx).putShort(ry).putShort(rz)
+        return buffer.array()
+    }
+}
+
 open class BeaconRssiPoller(protected val scope: CoroutineScope) : BluetoothGattCallback() {
     protected var device: BluetoothGatt ? = null
+    private var rssiRate = -1
     var onRssi: (Int) -> Unit = {}
     var onLost: () -> Unit = {}
+
+    fun enableRssi(rate: Int) {
+        rssiRate = rate
+        if (rate > 0) startRssiRequest()
+    }
 
     override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
         super.onConnectionStateChange(gatt, status, newState)
         when (newState) {
             BluetoothProfile.STATE_CONNECTED -> {
                 device = gatt
-                startRssiRequest()
             }
             BluetoothProfile.STATE_DISCONNECTED -> scope.launch { cbOnLost() }
         }
@@ -83,8 +117,11 @@ open class BeaconRssiPoller(protected val scope: CoroutineScope) : BluetoothGatt
     }
 
     private suspend fun requestRssi() {
-        delay(2)
-        device?.readRemoteRssi()
+        val rate = rssiRate
+        if (rate > 0) {
+            delay(rate.toLong())
+            device?.readRemoteRssi()
+        }
     }
 
     private fun cbOnLost() = onLost()
@@ -98,6 +135,8 @@ open class BeaconRssiPoller(protected val scope: CoroutineScope) : BluetoothGatt
 
 class BeaconPrimary(scope: CoroutineScope) : BeaconRssiPoller(scope) {
     private lateinit var characteristic: BluetoothGattCharacteristic
+    private val command = CommandEmitter()
+    private var cmdSenderLive = false
     var onInit: () -> Unit = {}
     var onRead: (String) -> Unit = {}
 
@@ -126,6 +165,11 @@ class BeaconPrimary(scope: CoroutineScope) : BeaconRssiPoller(scope) {
         if (x == characteristic) scope.launch { cbOnRead(characteristic.getStringValue(0)) }
     }
 
+    override fun onCharacteristicWrite(x: BluetoothGatt, v: BluetoothGattCharacteristic, s: Int) {
+        super.onCharacteristicWrite(x, v, s)
+        synchronized(this) { if (cmdSenderLive) cmdSenderLive = writeCommand() }
+    }
+
     private fun cbOnInit() = onInit()
 
     private fun cbOnRead(x: String) = onRead(x)
@@ -135,9 +179,20 @@ class BeaconPrimary(scope: CoroutineScope) : BeaconRssiPoller(scope) {
         device?.writeCharacteristic(characteristic)
     }
 
-    fun write(v: ByteArray) {
-        characteristic.value = v
-        device?.writeCharacteristic(characteristic)
+    private fun writeCommand(): Boolean {
+        val x = command.get()
+        if (x != null) {
+            characteristic.value = x
+            device?.writeCharacteristic(characteristic)
+        }
+        return x != null
+    }
+
+    fun cmd(x: Double, y: Double, z: Double) {
+        synchronized(this) {
+            command.push(x, y, z)
+            if (!cmdSenderLive) writeCommand()
+        }
     }
 }
 
@@ -154,6 +209,7 @@ class BeaconLocator(
     private var rRssi = RotatingAverage()
     private var cRssi = RotatingAverage()
     private var lastClk = (-1).toLong()
+    var enable = false
 
     init {
         c.onLost = {
@@ -174,11 +230,13 @@ class BeaconLocator(
     }
 
     fun rssiAttach() {
-        l.onRssi = { lRssi.add(convert(it, lPower)) }
-        r.onRssi = { rRssi.add(convert(it, rPower)) }
+        l.onRssi = { if (enable) lRssi.add(convert(it, lPower)) }
+        r.onRssi = { if (enable) rRssi.add(convert(it, rPower)) }
         c.onRssi = {
-            cRssi.add(convert(it, cPower))
-            evaluate()
+            if (enable) {
+                cRssi.add(convert(it, cPower))
+                evaluate()
+            }
         }
     }
 
@@ -187,19 +245,15 @@ class BeaconLocator(
         try {
             if ((now - lastClk) > 50) {
                 lastClk = now
-                val buffer = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
-                buffer.put('C'.toByte()).put('X'.toByte())
-                val x = (lRssi.average() * 1000.0).toInt().toShort()
-                val y = (cRssi.average() * 1000.0).toInt().toShort()
-                val z = (rRssi.average() * 1000.0).toInt().toShort()
-                buffer.putShort(x).putShort(y).putShort(z)
-                c.write(buffer.array())
+                c.cmd(lRssi.average(), cRssi.average(), rRssi.average())
             }
         }
-        catch(x: Throwable) {
+        catch (x: Throwable) {
             close()
         }
     }
+
+    fun command(x: Double, y: Double, z: Double) = c.cmd(x, y, z)
 
     private fun convert(x: Int, power: Int) = 1.0 / (10.0.pow((x - power).toDouble() / 20.0))
 }
@@ -302,10 +356,10 @@ class BeaconTrackerInitializer(
             val left = cbCommand(primaryCb, "GL")
             val right = cbCommand(primaryCb, "GR")
             // run secondary beacon discovery
-            //secondary(left, right)
+            secondary(left, right)
             // connect all beacons
-            //beaconL.connectGatt(context, true, leftCb)
-            //beaconR.connectGatt(context, true, rightCb)
+            beaconL.connectGatt(context, true, leftCb)
+            beaconR.connectGatt(context, true, rightCb)
             responder.rssiAttach()
             async.complete(responder)
         }
@@ -332,6 +386,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var bleConnectBtn: Button
     private lateinit var bleDropBtn: Button
     private lateinit var bleName: EditText
+    private lateinit var rocker: JoystickView
     private var barr: BeaconLocator? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -340,7 +395,18 @@ class MainActivity : AppCompatActivity() {
         bleConnectBtn = findViewById(R.id.ConnectBtn)
         bleDropBtn = findViewById(R.id.DisconnectBtn)
         bleName = findViewById(R.id.BLENameInput)
+        rocker = findViewById(R.id.Stick)
         bleDropBtn.isEnabled = false
+        rocker.setOnMoveListener( { angle, strength ->
+            val power = if (strength < 10) 0.0 else 0.8
+            if (barr != null) {
+                val a2 = (360 - ((angle + 270) % 360)) * Math.PI / 180.0
+                val z = 0.5
+                val x = sin(a2) * power
+                val y = cos(a2) * power
+                barr?.command(x, y, z)
+            }
+        }, 100)
     }
 
     private fun prepareBleScanner(): BluetoothLeScanner {

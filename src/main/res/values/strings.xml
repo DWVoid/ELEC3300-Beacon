@@ -3,4 +3,5 @@
     <string name="drop">Drop</string>
     <string name="connect">Connect</string>
     <string name="default_name">BARR-C</string>
+    <string name="ble_major_interface_name">BLE Major Interface Name</string>
 </resources>
