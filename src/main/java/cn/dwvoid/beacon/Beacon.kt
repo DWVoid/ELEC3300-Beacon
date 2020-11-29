@@ -4,6 +4,7 @@ import android.bluetooth.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.lang.Exception
 import java.util.*
 
 private val SERVICE_UUID = UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
@@ -12,42 +13,25 @@ private val DESCRIPTOR_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b3
 
 open class BeaconRssiPoller(protected val scope: CoroutineScope) : BluetoothGattCallback() {
     protected var device: BluetoothGatt? = null
-    private var rssiRate = -1
     var onRssi: (Int) -> Unit = {}
     var onLost: () -> Unit = {}
-
-    fun enableRssi(rate: Int) {
-        rssiRate = rate
-        if (rate > 0) startRssiRequest()
-    }
 
     override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
         super.onConnectionStateChange(gatt, status, newState)
         when (newState) {
-            BluetoothProfile.STATE_CONNECTED -> {
-                device = gatt
-            }
+            BluetoothProfile.STATE_CONNECTED -> device = gatt
             BluetoothProfile.STATE_DISCONNECTED -> scope.launch { cbOnLost() }
         }
     }
 
     override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
-        startRssiRequest()
         scope.launch { onRssi(rssi) }
-    }
-
-    private suspend fun requestRssi() {
-        val rate = rssiRate
-        if (rate > 0) {
-            delay(rate.toLong())
-            device?.readRemoteRssi()
-        }
     }
 
     private fun cbOnLost() = onLost()
 
-    private fun startRssiRequest() {
-        scope.launch { requestRssi() }
+    fun rssi() {
+        device?.readRemoteRssi()
     }
 
     fun close() = device?.close()

@@ -4,4 +4,6 @@
     <string name="connect">Connect</string>
     <string name="default_name">BARR-C</string>
     <string name="ble_major_interface_name">BLE Major Interface Name</string>
+    <string name="toggle_to_auto">To Auto</string>
+    <string name="toggle_to_manual">To Manual</string>
 </resources>

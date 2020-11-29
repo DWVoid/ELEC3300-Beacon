@@ -18,6 +18,17 @@
         app:layout_constraintTop_toBottomOf="@+id/BLENameInput" />
 
     <Button
+        android:id="@+id/ToggleBtn"
+        android:layout_width="110dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="80dp"
+        android:onClick="onToggleBtnClick"
+        android:text="@string/connect"
+        app:layout_constraintEnd_toEndOf="@+id/BLENameInput"
+        app:layout_constraintStart_toStartOf="@+id/BLENameInput"
+        app:layout_constraintTop_toBottomOf="@+id/BLENameInput" />
+
+    <Button
         android:id="@+id/DisconnectBtn"
         android:layout_width="110dp"
         android:layout_height="wrap_content"
@@ -42,7 +53,8 @@
         android:text="@string/default_name"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent" />
+        app:layout_constraintTop_toTopOf="parent"
+        tools:ignore="LabelFor" />
 
     <io.github.controlwear.virtual.joystick.android.JoystickView
         android:id="@+id/Stick"
@@ -58,5 +70,21 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent" />
+
+    <TextView
+        android:id="@+id/coord"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/Stick" />
+
+    <TextView
+        android:id="@+id/rssi"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/coord" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
